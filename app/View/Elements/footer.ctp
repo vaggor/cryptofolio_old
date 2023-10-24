@@ -1,0 +1,2 @@
+<footer class="content-footer">
+                CryptoFolio Version 1.0 Alpha - Made by <a href="http://victoraggor.com/" rel="nofollow noopener noreferrer" target="_blank">victoraggor.com</a>            </footer>

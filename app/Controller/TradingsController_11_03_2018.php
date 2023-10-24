@@ -1,0 +1,578 @@
+<?php
+App::uses('CakeEmail', 'Network/Email');
+App::import('Model', 'Binance');
+  class TradingsController extends AppController {
+  public $name = 'Tradings';
+  public $uses = array('User','Binance','Robot','TradingPair','Exchange','User','RobotTrade','Status','RobotTradingCoin','Invoice');
+  public $components = array('Session', 'Email','Auth');
+
+  	public function dashboard(){
+  		$sess = $this->Auth->user();
+		$user_id = $sess['id'];
+		$date = date('Y-m');
+		$active_trades = $this->RobotTrade->countAllActiveTradeByUserByMonth($user_id,$date);
+		$close_trades = $this->RobotTrade->countAllClosedTradeByUserByMonth($user_id,$date);
+		$total_trades = $active_trades + $close_trades;
+		$robots = $this->Robot->countRobotsByUser($user_id);
+		$profits = $this->RobotTrade->getProfitByUserWithoutRobotByMonth($user_id,$date);
+		$coins = $this->RobotTradingCoin->countActiveCoinsByUser($user_id);
+		$data = $this->RobotTradingCoin->getCoinByUserId($user_id);
+		$this->set(compact('active_trades','close_trades','total_trades','robots','profits','coins','data'));
+  	}
+  	
+  	/********************************************************* Robots **********************************************/
+
+  	public function new_robot(){
+  		$exch = $this->Exchange->listExchanges();
+  		$this->set(compact('exch'));
+  		if(!empty($this->data)){
+  			$sess = $this->Auth->user();
+  			$data = $this->request->data;
+  			$data['Robot']['date_added'] = date('Y-m-d H:i');
+  			$data['Robot']['user_id'] = $sess['id'];
+  			if($this->Robot->save($data)){
+  				$this->Session->setFlash('Saved successfully');
+  				$this->redirect('robots');
+  			}
+  		}
+  	}
+
+  	public function edit_robot($id=null){	
+  		$exch = $this->Exchange->listExchanges();
+  		$this->set(compact('exch'));
+		if(empty($this->data)){
+			//print_r($id);exit;
+			$sess = $this->Auth->user();
+			$user_id = $sess['id'];
+			$data=$this->Robot->getRobotById($user_id,$id);
+			$this->data=$data[0];
+		}	
+		elseif (!empty($this->data)) {
+			$data = $this->request->data;
+
+			$data['Robot']['date_modified'] = date('Y-m-d H:i');
+		 
+				//print_r($data);exit;
+			if ($this->Robot->save($data)) {
+				$this->Session->setFlash('Updated Successfully.');
+				$this->redirect(array('action' => 'robots'));
+			}
+		}
+	}
+
+	public function robots(){
+		$sess = $this->Auth->user();
+		$exch = $this->Exchange->listExchanges();
+		$data = $this->Robot->getRobotByUserId($sess['id']);
+		//print_r($data);exit;
+		$this->set(compact('data','exch'));
+	}
+
+	public function delete_robot($id) {
+		$sess = $this->Auth->user();
+		$user_id = $sess['id'];
+		if ($this->Robot->deleteRobot($id,$user_id)) {
+			$this->Session->setFlash('Deleted Succesfully.');
+			$this->redirect($this->referer());
+		}
+	}
+
+
+	/****************************************  Trades **********************************************/
+
+	public function active_trades(){
+		$page = 'Active Trades';
+		$sess = $this->Auth->user();
+		$user_id = $sess['id'];
+		$date = date('Y-m-d');
+		$lexch = $this->Exchange->listExchanges();
+		$data = $this->RobotTrade->getActiveTradesByUser($user_id);
+		$status = $this->Status->listStatuses();
+		$pnl = $this->RobotTrade->getTodaysTotalProfitByUser($user_id,$date);
+		$this->set(compact('data','lexch','page','status','pnl'));
+	}
+
+	public function closed_trades(){
+		$page = 'Closed Trades';
+		$sess = $this->Auth->user();
+		$user_id = $sess['id'];
+		$date = date('Y-m-d');
+		$lexch = $this->Exchange->listExchanges();
+		$data = $this->RobotTrade->getAClosedTradesByUser($user_id);
+		$status = $this->Status->listStatuses();
+		$pnl = $this->RobotTrade->getTodaysTotalProfitByUser($user_id,$date);
+		$this->set(compact('data','lexch','page','status','pnl'));
+		$this->render('active_trades');
+	}
+
+	public function all_trades(){
+		$page = 'All Trades';
+		$sess = $this->Auth->user();
+		$user_id = $sess['id'];
+		$date = date('Y-m-d');
+		$lexch = $this->Exchange->listExchanges();
+		$data = $this->RobotTrade->getTrades($user_id);
+		$status = $this->Status->listStatuses();
+		$pnl = $this->RobotTrade->getTodaysTotalProfitByUser($user_id,$date);
+		$this->set(compact('data','lexch','page','status','pnl'));
+		$this->render('active_trades');
+	}
+
+	public function update_trading_status($id=null,$status=null){
+  		$sess = $this->Auth->user();
+		$user_id = $sess['id'];
+		if($this->RobotTrade->updateCoinStatus($id,$user_id,$status)){
+			if($status == 4){
+				$this->Session->setFlash('Trading has been activated');
+			}
+			elseif($status == 6){
+				$this->Session->setFlash('Trading has been paused');
+			}
+			$this->redirect($this->referer());
+		}
+  	}
+
+	public function buy(){
+		$sess = $this->Auth->user();
+		if($sess['balance'] <= 0){
+			$this->Session->setFlash('You do not have enough balance in your CryptoFolio account. Please add fund below', array('class' => 'error1'));
+  			$this->redirect('invoice');
+		}
+  		$exch = $this->Exchange->listExchanges();
+  		$this->set(compact('exch'));
+  		if(!empty($this->data)){
+  			$data = $this->request->data;
+  			//print_r($data);exit;
+  			$cred = $this->get_api_credentials($data['RobotTrade']['exchange_id']);
+  			$api_key = $cred[0]['Robot']['api_key'];
+  			$api_secret = $cred[0]['Robot']['api_secret'];
+  			$robot_id = $cred[0]['Robot']['id'];
+  			$trade_pair = $this->TradingPair->getTradingPairById($data['RobotTrade']['trading_pair_id']);
+  			$quantity = $data['RobotTrade']['buy_qty'];
+  			$exchange_id = $data['RobotTrade']['exchange_id'];
+  			$trading_pair_id = $data['RobotTrade']['trading_pair_id'];
+  			$user_id = $sess['id'];
+  			if($data['RobotTrade']['exchange_id'] == 2){
+  				$trade_pair = str_replace('/', '', $trade_pair[0]['TradingPair']['pair']);
+  				$order_resp = $this->saveBinanceData($api_key,$api_secret,$trade_pair,$trading_pair_id,$quantity,$exchange_id,$robot_id,$user_id);
+  				if($order_resp == 'FILLED'){
+
+  					$this->Session->setFlash('Buy Order Succesfully FIlled');
+  					$this->redirect('all_trades');
+  				}
+  				else{
+  					$this->Session->setFlash($order_resp, array('class' => 'error1'));
+  					$this->redirect('all_trades');
+  				}
+  			}
+  			
+  		}
+  	}
+
+  	public function sell($id){
+  		$sess = $this->Auth->user();
+  		$data = $this->RobotTrade->getTradeById($sess['id'],$id);
+  			//print_r($data);exit;
+  		$cred = $this->get_api_credentials($data[0]['RobotTrade']['exchange_id']);
+  		$api_key = $cred[0]['Robot']['api_key'];
+  		$api_secret = $cred[0]['Robot']['api_secret'];
+  		$trade_pair = $data[0]['RobotTrade']['symbol'];
+  		$quantity = $data[0]['RobotTrade']['buy_qty'];
+  		$exchange_id = $data[0]['RobotTrade']['exchange_id'];
+  		$buy_price = $data[0]['RobotTrade']['buy_price'];
+  		$user_id = $data[0]['RobotTrade']['user_id'];
+
+  		$current_price = $this->getCurrentPrice($trade_pair,$user_id,$exchange_id);
+		//$current_price = '0.00004015';
+		$current_price = $current_price * $data[0]['RobotTrade']['buy_qty'];
+
+  		$perc_chg = $this->get_perc_change($current_price,$buy_price);
+  		
+  		if($data[0]['RobotTrade']['exchange_id'] == 2){
+  			$order_resp = $this->updateBinanceData($api_key,$api_secret,$trade_pair,$quantity,$exchange_id,$id,$buy_price,$perc_chg,$user_id);
+  			if($order_resp == 'FILLED'){
+  				$this->Session->setFlash('Sell Order Succesfully FIlled');
+  				$this->redirect('active_trades');
+  			}
+  			else{
+  				$this->Session->setFlash($order_resp, 'default', array('class' => 'error1'));
+  				$this->redirect('all_trades');
+  			}
+  		}
+  			
+  	}
+
+
+  	/************************************************* Save data ****************************************************/
+
+  	public function saveBinanceData($api_key,$api_secret,$trade_pair,$trading_pair_id,$quantity,$exchange_id,$robot_id,$user_id){
+  		$sess = $this->Auth->user();
+  		$api = new Binance($api_key,$api_secret);
+  		$order = $api->marketBuy($trade_pair, $quantity);
+  		//print_r($order);exit;
+  		/*$order = array('symbol' => 'BNBBTC',
+		    'orderId' => '7652393',
+		    'clientOrderId' => 'aAE7BNUhITQj3eg04iG1sY',
+		    'transactTime' => '1508564815865',
+		    'price' => '0.00000000',
+		    'origQty' => '1.00000000',
+		    'executedQty' => '1.00000000',
+		    'status' => 'FILLED',
+		    'timeInForce' => 'GTC',
+		    'type' => 'MARKET',
+		    'side' => 'BUY');*/
+  		
+  		if(@$order['status'] == 'FILLED'){
+  			
+	  		$buy_price = $this->get_binance_price($order['symbol'],$api_key,$api_secret,$quantity);
+	  		$data = array();
+		  	$data['RobotTrade']['user_id'] = $user_id;
+		  	$data['RobotTrade']['robot_id'] = $robot_id;
+		  	$data['RobotTrade']['exchange_id'] = $exchange_id;
+		  	$data['RobotTrade']['trading_pair_id'] = $trading_pair_id;
+		  	$data['RobotTrade']['symbol'] = $order['symbol'];
+		  	$data['RobotTrade']['buy_orderId'] = $order['orderId'];
+		  	$data['RobotTrade']['buy_clientOrderId'] = $order['clientOrderId'];
+		  	$data['RobotTrade']['buy_price'] = $data['RobotTrade']['sell_price'] = $buy_price;
+		  	$data['RobotTrade']['buy_qty'] = $quantity;
+		  	$data['RobotTrade']['buy_perc_chg'] = $data['RobotTrade']['sell_perc_chg'] = 0;
+		  	$data['RobotTrade']['buy_time'] = date('Y-m-d H:i');
+		  	$data['RobotTrade']['threshold'] = $data['RobotTrade']['buy_perc_chg'] + 1;
+		  	$data['RobotTrade']['status'] = 4;
+	  		//print_r($data);exit;
+	  		if($this->RobotTrade->save($data)){
+	  			return 'FILLED';
+	  		}
+  		}
+  		else{
+  			return $order['msg'];
+  		}
+
+  	}
+
+  	public function updateBinanceData($api_key,$api_secret,$trade_pair,$quantity,$exchange_id,$id,$buy_price,$perc_chg,$user_id){
+  		$sess = $this->Auth->user();
+  		$api = new Binance($api_key,$api_secret);
+  		$order = $api->marketSell($trade_pair, $quantity);
+  		/*$order = array('symbol' => 'BNBBTC',
+		    'orderId' => '7652393',
+		    'clientOrderId' => 'aAE7BNUhITQj3eg04iG1sY',
+		    'transactTime' => '1508564815865',
+		    'price' => '0.00000000',
+		    'origQty' => '1.00000000',
+		    'executedQty' => '1.00000000',
+		    'status' => 'FILLED',
+		    'timeInForce' => 'GTC',
+		    'type' => 'MARKET',
+		    'side' => 'BUY');*/
+  		
+  		if(@$order['status'] == 'FILLED'){
+
+	  		$price = $this->get_binance_price($trade_pair,$api_key,$api_secret,$quantity);
+	  		$data = array();
+		  	$data['RobotTrade']['id'] = $id;
+		  	$data['RobotTrade']['sell_orderId'] = $order['orderId'];
+		  	$data['RobotTrade']['sell_clientOrderId'] = $order['clientOrderId'];
+		  	$data['RobotTrade']['perc_profit'] = $this->get_perc_change($price,$buy_price);;
+		  	$data['RobotTrade']['profit'] = $price - $buy_price;
+		  	$data['RobotTrade']['sell_price'] = $price;
+		  	$data['RobotTrade']['sell_qty'] = $quantity;
+		  	$data['RobotTrade']['sell_perc_chg'] = $perc_chg;
+		  	$data['RobotTrade']['sell_time'] = date('Y-m-d H:i');
+		  	$data['RobotTrade']['status'] = 5;
+	  		//print_r($data);exit;
+	  		if($this->RobotTrade->save($data)){
+	  			$this->User->updateBalanceAfterSell($user_id,$data['RobotTrade']['profit']);
+		  		$chk_add_profit = $this->RobotTradingCoin->getAddProfit($user_id,$exchange_id,$trade_pair);
+		  		if($chk_add_profit == 1){
+		  			$this->RobotTradingCoin->add_profit_to_trading_amount($user_id,$exchange_id,$trade_pair,$data['RobotTrade']['profit']);
+		  		}
+		  		$this->RobotTradingCoin->update_profit($user_id,$exchange_id,$trade_pair,$data['RobotTrade']['profit']);
+	  			return 'FILLED';
+	  		}
+  		}
+  		else{
+  			return $order['msg'];
+  		}
+
+  	}
+
+
+  	/*public function get_perc_change($exchange_id,$trading_pair){
+		$sess = $this->Auth->user();
+		$user_id = $sess['id'];
+		$robot_data = $this->get_api_credentials($exchange_id);
+		$api_key = $robot_data[0]['Robot']['api_key'];
+		$api_secret = $robot_data[0]['Robot']['api_secret'];
+
+		if($exchange_id == 2){
+			$api = new Binance($api_key,$api_secret);
+			$prevDay = $api->prevDay($trading_pair);
+			$data = $prevDay['priceChangePercent'];
+		}
+		return $data;
+	}*/
+
+	public function get_perc_change($current_price,$buy_price){
+		
+		$data = ((($current_price - $buy_price) / $buy_price) * 100);
+		return $data;
+	}
+
+
+
+	public function get_api_credentials($exchange_id){
+		$sess = $this->Auth->user();
+		$user_id = $sess['id'];
+		$robot_data = $this->Robot->getRobotByUserIdAndExchange($user_id,$exchange_id);
+		return $robot_data;
+	}
+
+	public function get_robot_profit($robot_id){
+		$sess = $this->Auth->user();
+		$user_id = $sess['id'];
+		$robot_data = $this->RobotTrade->getProfitByUser($user_id,$robot_id);
+		return $robot_data;
+	}
+
+	public function convertBTCToUSD($btc){
+		$data = file_get_contents('https://api.coinmarketcap.com/v1/ticker/bitcoin/?convert=USD');
+		$obj = json_decode($data);
+		//print_r($obj[0]->price_usd);exit;
+		$usd = $obj[0]->price_usd * $btc;
+		return $usd;
+	}
+
+
+	public function get_trading_pairs() {
+		//$inst_id = 1;
+		$exchange_id = $this->request->data['RobotTrade']['exchange_id'];
+		$data = $this->TradingPair->listTradingPairForBotByExchange($exchange_id);
+		// print_r($data);exit;
+		$this->set('data',$data);
+		$this->layout = 'ajax';
+	}
+
+	public function get_trading_pairs2() {
+		//$inst_id = 1;
+		$exchange_id = $this->request->data['RobotTradingCoin']['exchange_id'];
+		$data = $this->TradingPair->listTradingPairForBotByExchange($exchange_id);
+		// print_r($data);exit;
+		$this->set('data',$data);
+		$this->layout = 'ajax';
+	}
+
+
+	public function get_binance_price($symbol,$api_key,$api_secret,$quantity){
+		$api = new Binance($api_key,$api_secret);
+
+		$history = $api->history($symbol);
+		$arr_sive = count($history);
+		$arr_index = $arr_sive - 1;
+		$price = $history[$arr_index]['price'];
+		return $price * $quantity;
+	}
+
+	public function getCurrentPrice($symbol,$user_id,$exchange_id){
+  			//print_r($data);exit;
+		if($exchange_id == 2){
+			$cred = $this->Robot->getRobotByUserIdAndExchange($user_id,$exchange_id);
+	  		$api_key = $cred[0]['Robot']['api_key'];
+	  		$api_secret = $cred[0]['Robot']['api_secret'];
+			$api = new Binance($api_key,$api_secret);
+
+			$bookPrices = $api->bookPrices();
+			$result = $bookPrices[$symbol]['bid'];
+		}
+		//print_r($bookPrices);
+		return $result;
+	}
+
+
+/****************************************************** Robot Trading Coins ***********************************************************************/
+
+	public function robot_trading_coins(){
+		$sess = $this->Auth->user();
+		$user_id = $sess['id'];
+		$data = $this->RobotTradingCoin->getCoinByUserId($user_id);
+		$exch = $this->Exchange->listExchanges();
+		$status = $this->Status->listStatuses();
+		$this->set(compact('data','exch','status'));
+	}
+
+	public function new_trading_coin(){
+  		$exch = $this->Exchange->listExchanges();
+  		$this->set(compact('exch'));
+  		if(!empty($this->data)){
+  			$sess = $this->Auth->user();
+  			$data = $this->request->data;
+
+  			$trade_pair = $this->TradingPair->getTradingPairById($data['RobotTradingCoin']['trading_pair_id']);
+  			$trade_pair = str_replace('/', '', $trade_pair[0]['TradingPair']['pair']);
+
+  			$data['RobotTradingCoin']['symbol'] = $trade_pair;
+  			$data['RobotTradingCoin']['date_added'] = date('Y-m-d H:i');
+  			$data['RobotTradingCoin']['user_id'] = $sess['id'];
+  			if($this->RobotTradingCoin->save($data)){
+  				$this->Session->setFlash('Saved successfully');
+  				$this->redirect('robot_trading_coins');
+  			}
+  		}
+  	}
+
+  	public function edit_trading_coin($id=null){
+  		if(empty($this->data)){
+  			$sess = $this->Auth->user();
+			$user_id = $sess['id'];
+			$data = $this->RobotTradingCoin->getCoinByUserId($user_id);
+			$exch = $this->Exchange->listExchanges();
+			$status = $this->Status->listStatuses();
+			$coin_data = $this->RobotTradingCoin->getCoinByIdNUser($id,$user_id);
+			$this->request->data = $coin_data[0];
+  			$this->set(compact('data','exch','status'));
+  		}
+  		elseif(!empty($this->data)){
+  			$sess = $this->Auth->user();
+  			$data = $this->request->data;
+
+  			if(empty($data['RobotTradingCoin']['trading_pair_id'])){
+  				$trade_pair = $this->RobotTradingCoin->getGetTradingPair($data['RobotTradingCoin']['id']);
+  			}
+  			else{
+  				$trade_pair = $this->TradingPair->getTradingPairById($data['RobotTradingCoin']['trading_pair_id']);
+  				$trade_pair = str_replace('/', '', $trade_pair[0]['TradingPair']['pair']);
+  			}
+
+  			$data['RobotTradingCoin']['symbol'] = $trade_pair;
+  			$data['RobotTradingCoin']['date_added'] = date('Y-m-d H:i');
+  			$data['RobotTradingCoin']['user_id'] = $sess['id'];
+  			//print_r($data);exit;
+  			if($this->RobotTradingCoin->save($data)){
+  				$this->Session->setFlash('Saved successfully');
+  				$this->redirect('robot_trading_coins');
+  			}
+  		}
+  	}
+
+  	public function update_trading_coin_status($id=null,$status=null){
+  		$sess = $this->Auth->user();
+		$user_id = $sess['id'];
+		if($this->RobotTradingCoin->updateCoinStatus($id,$user_id,$status)){
+			if($status == 4){
+				$this->Session->setFlash('Trading Coin has been activated');
+			}
+			elseif($status == 6){
+				$this->Session->setFlash('Trading Coin has been paused');
+			}
+			$this->redirect($this->referer());
+		}
+  	}
+
+  	public function delete_trading_coin($id) {
+		$sess = $this->Auth->user();
+		$user_id = $sess['id'];
+		if ($this->RobotTradingCoin->deleteCoin($id,$user_id)) {
+			$this->Session->setFlash('Deleted Succesfully.');
+			$this->redirect($this->referer());
+		}
+	}
+
+/************************************************************************************************************************************/
+
+	public function test_operation(){
+		$sess = $this->Auth->user();
+		$user_id = $sess['id'];
+		$exchange_id = 2;
+		$robot_data = $this->Robot->getRobotByUserIdAndExchange($user_id,$exchange_id);
+		$api_key = $robot_data[0]['Robot']['api_key'];
+		$api_secret = $robot_data[0]['Robot']['api_secret'];
+		$api = new Binance($api_key,$api_secret);
+
+		$bookPrices = $api->bookPrices();
+		//print_r($bookPrices);
+		echo "Bid price of IOTA: ".$bookPrices['IOTABTC']['bid'];
+		exit;
+	}
+
+	public function binance_of_positions(){
+		$sess = $this->Auth->user();
+		$user_id = $sess['id'];
+		$exchange_id = 2;
+		$robot_data = $this->Robot->getRobotByUserIdAndExchange($user_id,$exchange_id);
+		$api_key = $robot_data[0]['Robot']['api_key'];
+		$api_secret = $robot_data[0]['Robot']['api_secret'];
+		$api = new Binance($api_key,$api_secret);
+
+		$ticker = 'BTC';
+		$balances = $api->balances($ticker);
+		echo "BTC owned: ".$balances['BTC']['available'].PHP_EOL;
+		//echo "ETH owned: ".$balances['ETH']['available'].PHP_EOL;
+		//echo "Total Balance in BTC: ".$tot_bal_in_btc." BTC".PHP_EOL;
+		//echo "Estimated Value: ".$api->btc_value." BTC".PHP_EOL;
+		exit;
+	}
+
+
+	public function get_order_status(){
+		$sess = $this->Auth->user();
+		$user_id = $sess['id'];
+		$exchange_id = 2;
+		$robot_data = $this->Robot->getRobotByUserIdAndExchange($user_id,$exchange_id);
+		//print_r($robot_data);exit;
+		$api_key = $robot_data[0]['Robot']['api_key'];
+		$api_secret = $robot_data[0]['Robot']['api_secret'];
+		$api = new Binance($api_key,$api_secret);
+
+		$history = $api->history("ADABTC");
+		$arr_sive = count($history);
+		print_r($history);
+		
+		exit;
+	}
+
+
+/******************************************************** Invoice *******************************************************************/
+
+	public function invoice(){
+		$invoice_no = $this->Invoice->generateInvoice(6);
+		$url = 'https://block.io/api/v2/get_new_address/?api_key=3b30-21d4-9559-8e85&label='.$invoice_no;
+		$json_obj = json_decode(file_get_contents($url),true);
+		//$json_obj = Array ( 'status' => 'success', 'data' => Array ( 'network' => 'BTC', 'user_id' => '10', 'address' => '3Bkghcshc8DWTzLzJGavdBA5NetN9X3jCf', 'label' => '609600' ) );
+		//print_r($json_obj);exit;
+		$address = $json_obj['data']['address'];
+		$date = date('Y-m-d h:m');
+		$amount = '0.005';
+		
+		//print_r($json_obj);exit;
+		$this->set(compact('invoice_no','address','date','amount'));
+
+	}
+
+	public function payment_success(){
+		if(!empty($this->data)){
+			$data = $this->request->data;
+			$sess = $this->Auth->user();
+
+			$data['Invoice']['user_id'] = $sess['id'];
+			$data['Invoice']['email'] = $sess['email'];
+			$amount = $data['Invoice']['amount'];
+			$address = $data['Invoice']['address'];
+			//print_r($data);exit;
+			if($this->Invoice->save($data)){
+				//$this->Session->setFlash('Payment has been successfully sent pending blockchain confirmation');
+				$this->set(compact('amount','address'));
+			}
+		}
+	}
+
+	public function load($address){
+		$this->layout = false;
+		$data = $this->Invoice->getInvoiceByAddress($address);
+		//print_r($data);exit;
+		$status = $data[0]['Invoice']['status'];
+		$this->set(compact('status'));
+	}
+
+  
+}
+?>
